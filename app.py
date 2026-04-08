@@ -247,6 +247,23 @@ def build_kb(uploaded_files):
 def kb_to_str(kb):
     return "\n".join(f"{k}: {v}" for k,v in kb.items())
 
+def score_color(score, umbral):
+    """Green if >= umbral, yellow if >= 70% of umbral, red otherwise."""
+    if score >= umbral:
+        return "#22c55e"
+    elif score >= umbral * 0.7:
+        return "#eab308"
+    else:
+        return "#ef4444"
+
+def verdict_label(avg, umbral):
+    if avg >= umbral:
+        return "✅ PASS", "#22c55e"
+    elif avg >= umbral * 0.7:
+        return "⚠️ WARN", "#eab308"
+    else:
+        return "❌ FAIL", "#ef4444"
+
 # ── TABS ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🤖 Pipeline Multi-Agente",
@@ -324,23 +341,27 @@ with tab1:
 <span style="font-family:monospace">{d['respuesta'].replace(chr(10),'<br>')}</span></div>""",
                 unsafe_allow_html=True)
 
+            st.markdown("**Documentos citados en la respuesta:**")
             docs_citados = [k for k in d["kb"] if k in d["respuesta"]]
             if docs_citados:
-                st.markdown("**Documentos citados:**")
                 cols = st.columns(len(docs_citados))
                 for i, did in enumerate(docs_citados):
                     txt = d["kb"][did]
                     c = "🔴 DESACTUALIZADO" if "DESACTUALIZADO" in txt else ("🟢 VIGENTE" if "VIGENTE" in txt else "⚪")
                     cols[i].markdown(f"**{c}**")
                     cols[i].caption(f"**{did}**: {txt[:60]}...")
+            else:
+                st.caption("⚠️ El agente no citó documentos explícitamente (no se encontró [POL-X] en la respuesta)")
 
             e = d["eval"]
             avg = sum([e["grounded"]["score"], e["behavioral"]["score"],
                        e["safety"]["score"], e["debate"]["score"]]) / 4
-            verdict_color = "#22c55e" if avg >= umbral else ("#eab308" if avg >= 0.4 else "#ef4444")
-            st.markdown(f"""<div class="card" style="border-color:{verdict_color}">
+            vlabel, vcolor = verdict_label(avg, umbral)
+            st.markdown(f"""<div class="card" style="border-color:{vcolor}">
 <b>Score promedio del consejo de jueces:</b>
-<span class="score" style="color:{verdict_color}"> {avg:.0%}</span>
+<span class="score" style="color:{vcolor}"> {avg:.0%}</span>
+<span style="color:{vcolor};font-size:1rem;font-weight:bold;margin-left:12px">{vlabel}</span>
+<div style="color:#64748b;font-size:.75rem;margin-top:4px">Umbral configurado: {umbral:.0%}</div>
 </div>""", unsafe_allow_html=True)
             st.caption("→ Ve a la pestaña **⚖️ Los 4 Jueces** para el detalle completo")
         else:
@@ -393,7 +414,7 @@ with tab2:
         ]
         for col, key, name, label, color in judges_display:
             score = e[key]["score"]
-            sc = "#22c55e" if score >= umbral else ("#eab308" if score >= 0.4 else "#ef4444")
+            sc = score_color(score, umbral)
             extra = e[key].get("action", e[key].get("verdict",""))
             col.markdown(f"""<div class="card" style="border-color:{sc};text-align:center">
 <div style="color:#94a3b8;font-size:.8rem">{name}</div>
