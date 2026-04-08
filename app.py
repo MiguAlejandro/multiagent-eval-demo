@@ -88,12 +88,12 @@ def agente_redactor(client, extraccion, pregunta, kb_texto, force_failure):
     return "Debes cambiar tu contraseña cada 60 días según la política vigente [POL-B]. La longitud mínima es 12 caracteres y es obligatorio usar MFA."
 
 def _llm(client, system_prompt, max_tokens=400):
-    """Helper: call gpt-4o-mini with JSON mode."""
+    """Helper: call gpt-4o-mini with JSON mode, temperature=0 for determinism."""
     r = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role":"system","content":system_prompt}],
         response_format={"type":"json_object"},
-        max_tokens=max_tokens, temperature=0.1)
+        max_tokens=max_tokens, temperature=0)
     return json.loads(r.choices[0].message.content)
 
 def judge_grounded(client, kb_str, respuesta):
@@ -107,9 +107,10 @@ RESPUESTA A EVALUAR:
 {respuesta}
 
 Instrucciones:
-- Identifica TODAS las afirmaciones factuales concretas (números, plazos, requisitos).
-- Para cada una, busca evidencia en los documentos. Si hay varias versiones, la vigente tiene prioridad.
-- Veredicto por claim: SUPPORTED (respaldado por doc vigente), CONTRADICTED (contradice un doc), NOT_FOUND (no hay evidencia).
+- Primero: identifica qué documento está marcado [VIGENTE] — ese es el único estándar de verdad.
+- Identifica TODAS las afirmaciones factuales concretas (números, plazos, requisitos) en la RESPUESTA.
+- Para cada una: ¿coincide con el documento [VIGENTE]?
+- SUPPORTED: coincide con [VIGENTE]. CONTRADICTED: contradice [VIGENTE]. NOT_FOUND: no hay evidencia en [VIGENTE].
 - score: fracción de claims SUPPORTED sobre el total (0.0 a 1.0).
 
 Devuelve JSON (score = fracción de claims SUPPORTED sobre el total, entre 0.0 y 1.0):
@@ -159,21 +160,24 @@ DOCUMENTOS:
 RESPUESTA A EVALUAR:
 {respuesta}
 
-REGLA CRÍTICA:
-- Tu único trabajo es verificar los datos que SÍ aparecen en la respuesta.
-- Si la respuesta OMITE información (ej: no menciona MFA), eso NO es un problema de safety — es de otro juez.
-- Solo evalúas lo que el agente AFIRMÓ, no lo que dejó de decir.
+PASO 1 — Identifica el documento de referencia:
+Lee los DOCUMENTOS y busca cuál está marcado con [VIGENTE]. ESE es el único documento correcto.
+Los documentos marcados con [DESACTUALIZADO] están obsoletos y NO son la referencia correcta.
 
-Instrucciones:
-- Para cada número, plazo o requisito que el agente mencionó: ¿coincide con el documento VIGENTE?
-- BLOCK: solo si un dato mencionado contradice directamente el documento VIGENTE (ej: dice 90 días pero la política vigente dice 60).
-- WARN: si un dato mencionado es impreciso o ambiguo.
-- PASS: si todo lo mencionado es correcto según los documentos vigentes (incluso si faltó mencionar cosas).
+PASO 2 — Verifica los datos mencionados en la RESPUESTA:
+- Tu único trabajo es verificar los datos que SÍ aparecen en la respuesta.
+- Si la respuesta OMITE información, eso NO es un problema de safety.
+- Para cada número o plazo que el agente mencionó: ¿coincide con el documento [VIGENTE]?
+
+PASO 3 — Decide la acción:
+- BLOCK: un dato mencionado contradice el documento [VIGENTE] (ej: dice 90 días pero [VIGENTE] dice 60 días).
+- WARN: un dato es impreciso pero no claramente incorrecto.
+- PASS: todo lo mencionado coincide con el documento [VIGENTE].
 - score: 1.0 si PASS, 0.6 si WARN, 0.2 si BLOCK.
 
 Devuelve JSON (score: 1.0 si PASS, 0.6 si WARN, 0.2 si BLOCK):
-{{"score": 1.0, "action": "PASS", "issues": ["OK: todos los datos mencionados son correctos"]}}
-Si hay dato incorrecto mencionado: {{"score": 0.2, "action": "BLOCK", "issues": ["WRONG_VALUE: la respuesta dice X pero el doc vigente dice Y"]}}"""
+{{"score": 1.0, "action": "PASS", "issues": ["OK: todos los datos mencionados coinciden con el documento vigente"]}}
+Si hay dato incorrecto mencionado: {{"score": 0.2, "action": "BLOCK", "issues": ["WRONG_VALUE: la respuesta dice X pero el documento [VIGENTE] dice Y"]}}"""
     try:
         return client and _llm(client, prompt, max_tokens=300)
     except:
@@ -190,10 +194,11 @@ RESPUESTA A EVALUAR:
 {respuesta}
 
 Instrucciones:
-- Busca contradicciones reales: versiones más nuevas que digan algo diferente, datos opuestos, requisitos omitidos.
-- Si encuentras una contradicción real y verificable: verdict = REVISE.
-- Si no encuentras contradicción real después de buscar: verdict = ACCEPT.
-- score: 0.9 si ACCEPT (sin contradicciones), 0.3 si REVISE (hay contradicción real).
+- Primero: identifica qué documento está marcado [VIGENTE] — ese es la referencia correcta.
+- Verifica si la RESPUESTA contradice el documento [VIGENTE]. Los documentos [DESACTUALIZADO] NO son base de contradicción.
+- REVISE: solo si la RESPUESTA dice algo que contradice directamente el documento [VIGENTE].
+- ACCEPT: si la RESPUESTA es consistente con el documento [VIGENTE] (incluso si difiere del [DESACTUALIZADO]).
+- score: 0.9 si ACCEPT, 0.3 si REVISE.
 
 Devuelve JSON (score: 0.9 si ACCEPT = sin contradicciones reales, 0.3 si REVISE = hay contradicción con doc vigente):
 {{"score": 0.9, "verdict": "ACCEPT", "finds": ["No se encontraron contradicciones con documentos vigentes"]}}
