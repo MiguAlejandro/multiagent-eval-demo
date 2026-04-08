@@ -319,6 +319,8 @@ with tab1:
 
         if "pipeline_data" not in st.session_state:
             st.session_state["pipeline_data"] = None
+        if "run_history" not in st.session_state:
+            st.session_state["run_history"] = []
 
         if st.button("▶️ Ejecutar Pipeline", type="primary", use_container_width=True):
             if not pregunta:
@@ -349,6 +351,17 @@ with tab1:
                     "kb": kb, "pregunta": pregunta, "extraccion": extraccion,
                     "respuesta": respuesta, "eval": eval_data, "failure": simulate_failure
                 }
+                # Guardar métricas en historial
+                sv = [eval_data[k]["score"] for k in ["grounded","behavioral","safety","debate"]]
+                run_n = len(st.session_state["run_history"]) + 1
+                st.session_state["run_history"].append({
+                    "run":       f"Run {run_n} {'❌ Fallo' if simulate_failure else '✅ Correcto'}",
+                    "grounded":  sv[0], "behavioral": sv[1],
+                    "safety":    sv[2], "debate":     sv[3],
+                    "acuerdo":   max(0.0, 1.0 - (max(sv) - min(sv))),
+                    "global":    sum(sv) / 4,
+                })
+                st.session_state["run_history"] = st.session_state["run_history"][-6:]
 
     with col_out:
         st.markdown("**📄 3. Respuesta generada**")
@@ -472,180 +485,353 @@ with tab2:
                 st.markdown(f"🔍 {f}")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 — MÉTRICAS DE COORDINACIÓN
+# TAB 3 — HISTORIAL DE EJECUCIONES
 # ═════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.subheader("Métricas de Coordinación Multi-Agente")
-    st.caption("Estas métricas son gratis una vez que tienes trazas OTEL. Miden el sistema, no al agente individual.")
+    st.subheader("📊 Historial de Ejecuciones — Comparación en Vivo")
+    st.caption("Cada vez que ejecutas el pipeline, aparece una nueva fila. Ejecuta con fallo y sin fallo para ver el contraste.")
 
-    RUNS = [
-        {"run":"Run-A (Normal)",           "agreement":0.89,"correction_yield":0.82,"handoff_fidelity":0.91,"tool_efficiency":0.75,"latency_coupling":0.22,"cascade_depth":0.0,"semantic_drift":0.08},
-        {"run":"Run-B (Delegation Gap)",   "agreement":0.71,"correction_yield":0.30,"handoff_fidelity":0.55,"tool_efficiency":0.60,"latency_coupling":0.28,"cascade_depth":0.67,"semantic_drift":0.32},
-        {"run":"Run-C (Tool Failure)",     "agreement":0.45,"correction_yield":0.10,"handoff_fidelity":0.40,"tool_efficiency":0.10,"latency_coupling":0.80,"cascade_depth":1.0, "semantic_drift":0.75},
-        {"run":"Run-D (Stale Document)",   "agreement":0.68,"correction_yield":0.55,"handoff_fidelity":0.72,"tool_efficiency":0.70,"latency_coupling":0.25,"cascade_depth":0.33,"semantic_drift":0.35},
-        {"run":"Run-E (Verif. Theater)",   "agreement":0.93,"correction_yield":0.05,"handoff_fidelity":0.88,"tool_efficiency":0.78,"latency_coupling":0.20,"cascade_depth":0.67,"semantic_drift":0.20},
-    ]
-    df = pd.DataFrame(RUNS).set_index("run")
-    # Invertir métricas donde más alto = peor
-    df_norm = df.copy()
-    df_norm["latency_coupling"] = 1 - df_norm["latency_coupling"]
-    df_norm["cascade_depth"]    = 1 - df_norm["cascade_depth"]
-    df_norm["semantic_drift"]   = 1 - df_norm["semantic_drift"]
+    # ── Explicaciones de métricas (siempre visibles) ─────────────────────────
+    st.markdown("#### ¿Qué mide cada columna?")
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.markdown("""<div class="card" style="border-color:#3b82f6">
+<div style="color:#3b82f6;font-weight:bold">🔵 Grounded</div>
+<div style="font-size:.82rem;margin-top:4px">¿Cada dato mencionado tiene evidencia en los docs?</div>
+<div style="color:#94a3b8;font-size:.75rem;margin-top:4px">1.0 = todo respaldado · 0.0 = nada tiene fuente</div>
+</div>""", unsafe_allow_html=True)
+    mc2.markdown("""<div class="card" style="border-color:#a855f7">
+<div style="color:#a855f7;font-weight:bold">🟣 Behavioral</div>
+<div style="font-size:.82rem;margin-top:4px">¿El agente citó fuentes y usó la versión vigente?</div>
+<div style="color:#94a3b8;font-size:.75rem;margin-top:4px">1.0 = proceso correcto · bajo = citó desactualizado u omitió</div>
+</div>""", unsafe_allow_html=True)
+    mc3.markdown("""<div class="card" style="border-color:#ef4444">
+<div style="color:#ef4444;font-weight:bold">🔴 Safety</div>
+<div style="font-size:.82rem;margin-top:4px">¿Algún dato mencionado es factualmente incorrecto?</div>
+<div style="color:#94a3b8;font-size:.75rem;margin-top:4px">1.0 = PASS · 0.6 = WARN · 0.2 = BLOCK (dato incorrecto)</div>
+</div>""", unsafe_allow_html=True)
 
-    metric_labels = ["Acuerdo\nJueces","Correcc.\nYield","Handoff\nFidelidad","Tool\nEfic.","Latencia\n(inv)","Cascade\n(inv)","Drift\nSem.(inv)"]
+    mc4, mc5, mc6 = st.columns(3)
+    mc4.markdown("""<div class="card" style="border-color:#eab308">
+<div style="color:#eab308;font-weight:bold">🟡 Debate</div>
+<div style="font-size:.82rem;margin-top:4px">¿Hay contradicción real con los docs vigentes?</div>
+<div style="color:#94a3b8;font-size:.75rem;margin-top:4px">0.9 = ACCEPT (sin contradicción) · 0.3 = REVISE</div>
+</div>""", unsafe_allow_html=True)
+    mc5.markdown("""<div class="card" style="border-color:#06b6d4">
+<div style="color:#06b6d4;font-weight:bold">🤝 Acuerdo</div>
+<div style="font-size:.82rem;margin-top:4px">¿Todos los jueces coinciden en su evaluación?</div>
+<div style="color:#94a3b8;font-size:.75rem;margin-top:4px">1 - diferencia entre el juez más alto y el más bajo</div>
+</div>""", unsafe_allow_html=True)
+    mc6.markdown("""<div class="card" style="border-color:#8b5cf6">
+<div style="color:#8b5cf6;font-weight:bold">🌐 Global</div>
+<div style="font-size:.82rem;margin-top:4px">Calidad general de la respuesta</div>
+<div style="color:#94a3b8;font-size:.75rem;margin-top:4px">Promedio de los 4 jueces. Refleja el resultado final.</div>
+</div>""", unsafe_allow_html=True)
 
-    fig_heat = go.Figure(go.Heatmap(
-        z=df_norm.values,
-        x=metric_labels,
-        y=df_norm.index.tolist(),
-        colorscale="RdYlGn", zmin=0, zmax=1,
-        text=[[f"{v:.2f}" for v in row] for row in df_norm.values],
-        texttemplate="%{text}",
-        hovertemplate="%{y} | %{x}: %{z:.2f}<extra></extra>"
-    ))
-    fig_heat.update_layout(
-        title="Heatmap de Coordinación (verde=bueno, rojo=problema)",
-        paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
-        font=dict(color="#e2e8f0"), height=320,
-        margin=dict(l=160,r=20,t=60,b=80)
-    )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.markdown("---")
 
-    st.markdown("""
-> **🔍 Observa Run-E (Verification Theater):** `agreement = 0.93` → todos los jueces de acuerdo. Parece el mejor.
-> Pero `correction_yield = 0.05` → casi nada de lo detectado se corrigió. El verificador dijo OK sin verificar realmente.
->
-> **Run-C (Tool Failure):** todo en rojo — pero al menos el sistema **sabe** que falló. Es recuperable. Run-E es silencioso.
-""")
+    rh = st.session_state.get("run_history", [])
+    if not rh:
+        st.info("Todavía no hay ejecuciones registradas. Ve a **🤖 Pipeline Multi-Agente**, ejecuta al menos dos veces (una con fallo, una sin fallo) para ver el contraste aquí.")
+    else:
+        cols_m = ["grounded","behavioral","safety","debate","acuerdo","global"]
+        labels_m = ["Grounded","Behavioral","Safety","Debate","Acuerdo","Global"]
+        df_h = pd.DataFrame(rh).set_index("run")[cols_m]
+
+        fig_h = go.Figure(go.Heatmap(
+            z=df_h.values,
+            x=labels_m,
+            y=df_h.index.tolist(),
+            colorscale="RdYlGn", zmin=0, zmax=1,
+            text=[[f"{v:.2f}" for v in row] for row in df_h.values],
+            texttemplate="%{text}",
+            hovertemplate="%{y} | %{x}: %{z:.2f}<extra></extra>"
+        ))
+        row_h = max(180, 80 + len(rh) * 50)
+        fig_h.update_layout(
+            title="Heatmap — verde = bueno, rojo = problema detectado",
+            paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
+            font=dict(color="#e2e8f0"), height=row_h,
+            margin=dict(l=180,r=20,t=60,b=60)
+        )
+        st.plotly_chart(fig_h, use_container_width=True)
+
+        if st.button("🗑️ Limpiar historial", use_container_width=False):
+            st.session_state["run_history"] = []
+            st.rerun()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 4 — MADUREZ + COSTOS
 # ═════════════════════════════════════════════════════════════════════════════
 with tab4:
     st.subheader("Modelo de Madurez: ¿Qué construir primero?")
-    st.caption("5 etapas. No hay que llegar al Stage 4 desde el día 1. El mejor ROI está en Stage 2+3.")
 
     STAGES = [
-        {"stage":0,"nombre":"Logs Only",          "semanas":1,"roi":5000, "fallos":10,"estado":"PARCIAL"},
-        {"stage":1,"nombre":"Deterministic Gates", "semanas":2,"roi":18000,"fallos":25,"estado":"PENDIENTE"},
-        {"stage":2,"nombre":"Grounded Judging",    "semanas":3,"roi":45000,"fallos":55,"estado":"PENDIENTE"},
-        {"stage":3,"nombre":"Behavioral Scoring",  "semanas":3,"roi":55000,"fallos":75,"estado":"PENDIENTE"},
-        {"stage":4,"nombre":"Council + Replay",    "semanas":6,"roi":70000,"fallos":92,"estado":"FUTURO"},
+        {"stage":0,"nombre":"Logs Only",          "semanas":1,"roi_base":5000, "fallos":10,"costo_base":2},
+        {"stage":1,"nombre":"Deterministic Gates", "semanas":2,"roi_base":18000,"fallos":25,"costo_base":3},
+        {"stage":2,"nombre":"Grounded Judging",    "semanas":3,"roi_base":45000,"fallos":55,"costo_base":55},
+        {"stage":3,"nombre":"Behavioral Scoring",  "semanas":3,"roi_base":55000,"fallos":75,"costo_base":70},
+        {"stage":4,"nombre":"Council + Replay",    "semanas":6,"roi_base":70000,"fallos":92,"costo_base":200},
     ]
 
-    # Métricas principales
-    c0,c1,c2,c3,c4 = st.columns(5)
-    for col, s in zip([c0,c1,c2,c3,c4], STAGES):
-        color = "#eab308" if s["estado"]=="PARCIAL" else "#22c55e" if s["estado"]=="PENDIENTE" else "#475569"
-        delta_txt = "← Estás aquí" if s["estado"]=="PARCIAL" else ("← Mejor ROI" if s["stage"] in [2,3] else "")
+    # ── Controles interactivos ────────────────────────────────────────────────
+    col_ctrl1, col_ctrl2 = st.columns([2, 1])
+    with col_ctrl1:
+        req_mes = st.slider("📦 Solicitudes por mes", min_value=500, max_value=50000,
+                            value=5000, step=500,
+                            help="Ajusta según el volumen real de tu sistema")
+    with col_ctrl2:
+        costo_fallo = st.number_input("💸 Costo promedio por fallo ($)", min_value=10,
+                                       max_value=10000, value=100, step=10,
+                                       help="Multa, reembolso, hora de soporte, etc.")
+
+    # Calcular ROI escalado con los parámetros del usuario
+    tasa_fallo_base = 0.15  # asumimos 15% de requests son fallos sin evaluación
+    for s in STAGES:
+        fallos_evitados = req_mes * tasa_fallo_base * (s["fallos"] / 100)
+        s["roi_calc"] = fallos_evitados * costo_fallo
+        s["costo_calc"] = s["costo_base"] * (req_mes / 5000)
+
+    st.markdown("---")
+
+    # ── Panel: tu sistema actual vs stages ───────────────────────────────────
+    rh = st.session_state.get("run_history", [])
+    if rh:
+        avg_global = sum(r["global"] for r in rh) / len(rh)
+        avg_safety = sum(r["safety"] for r in rh) / len(rh)
+        fallos_reales = sum(1 for r in rh if r["global"] < umbral) / len(rh)
+
+        st.markdown("#### Tu pipeline en números reales")
+        pa, pb, pc, pd_ = st.columns(4)
+        pa.metric("Ejecuciones registradas", len(rh))
+        pb.metric("Score global promedio", f"{avg_global:.0%}",
+                  delta="↑ bueno" if avg_global >= umbral else "↓ bajo umbral",
+                  delta_color="normal" if avg_global >= umbral else "inverse")
+        pc.metric("Safety promedio", f"{avg_safety:.0%}",
+                  delta="PASS" if avg_safety >= 0.7 else "RIESGO",
+                  delta_color="normal" if avg_safety >= 0.7 else "inverse")
+        pd_.metric("Runs bajo umbral", f"{fallos_reales:.0%}",
+                   delta="de tus ejecuciones fallaron", delta_color="off")
+
+        # Recomendación basada en datos reales
+        if avg_global < 0.5:
+            rec_stage = 2
+            rec_msg = "Scores muy bajos — el Grounded Judge (Stage 2) es urgente."
+            rec_color = "#ef4444"
+        elif avg_global < umbral:
+            rec_stage = 3
+            rec_msg = "Scores por debajo del umbral — Stage 2+3 es el siguiente paso."
+            rec_color = "#eab308"
+        else:
+            rec_stage = 4
+            rec_msg = "Tu pipeline pasa el umbral. Stage 4 (Council + Replay) para alto riesgo."
+            rec_color = "#22c55e"
+        st.markdown(f"""<div class="card" style="border-color:{rec_color}">
+<b style="color:{rec_color}">Recomendación basada en tus {len(rh)} ejecución(es):</b>
+Implementar Stage {rec_stage} — {rec_msg}
+</div>""", unsafe_allow_html=True)
+        st.markdown("---")
+
+    # ── Cards de stages ───────────────────────────────────────────────────────
+    st.markdown("#### ROI por stage — ajustado a tu volumen")
+    stage_cols = st.columns(5)
+    for col, s in zip(stage_cols, STAGES):
+        roi_n = s["roi_calc"]
+        costo_n = s["costo_calc"]
+        net = roi_n - costo_n
+        color = "#22c55e" if net > 0 else "#ef4444"
+        rec_mark = " ⭐" if s["stage"] in [2, 3] else ""
         col.markdown(f"""<div class="card" style="border-color:{color};text-align:center">
-<div style="color:{color};font-size:.75rem;font-weight:bold">Stage {s['stage']}</div>
-<div style="color:#e2e8f0;font-size:.8rem;margin:4px 0">{s['nombre']}</div>
-<div style="color:{color};font-size:1.4rem;font-weight:bold">{s['fallos']}%</div>
-<div style="color:#94a3b8;font-size:.7rem">fallos evitados</div>
-<div style="color:{color};font-size:.7rem;margin-top:4px">{delta_txt}</div>
+<div style="color:{color};font-size:.72rem;font-weight:bold">Stage {s['stage']}{rec_mark}</div>
+<div style="color:#e2e8f0;font-size:.78rem;margin:3px 0">{s['nombre']}</div>
+<div style="color:#22c55e;font-size:1.1rem;font-weight:bold">${roi_n:,.0f}</div>
+<div style="color:#94a3b8;font-size:.68rem">ROI/mes</div>
+<div style="color:#ef4444;font-size:.8rem">−${costo_n:,.0f} costo</div>
+<div style="color:{color};font-size:.72rem;font-weight:bold;margin-top:4px">
+  NET: ${net:,.0f}</div>
+<div style="color:#94a3b8;font-size:.68rem">{s['semanas']} sem · {s['fallos']}% fallos</div>
 </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-    colors_s = ["#eab308" if s["estado"]=="PARCIAL" else "#22c55e" if s["estado"]=="PENDIENTE" else "#475569" for s in STAGES]
-    fig_roi = go.Figure(go.Bar(
-        x=[s["nombre"] for s in STAGES],
-        y=[s["roi"] for s in STAGES],
-        marker_color=colors_s,
-        text=[f'${s["roi"]:,}<br>{s["semanas"]} sem' for s in STAGES],
-        textposition="outside"
-    ))
+
+    # ── Gráfico ROI vs Costo ──────────────────────────────────────────────────
+    nombres = [s["nombre"] for s in STAGES]
+    rois = [s["roi_calc"] for s in STAGES]
+    costos = [s["costo_calc"] for s in STAGES]
+    nets = [r - c for r, c in zip(rois, costos)]
+
+    fig_roi = go.Figure()
+    fig_roi.add_trace(go.Bar(name="ROI evitado", x=nombres, y=rois,
+                             marker_color="#22c55e", opacity=0.8))
+    fig_roi.add_trace(go.Bar(name="Costo evaluación", x=nombres, y=costos,
+                             marker_color="#ef4444", opacity=0.8))
+    fig_roi.add_trace(go.Scatter(name="Beneficio neto", x=nombres, y=nets,
+                                 mode="lines+markers",
+                                 line=dict(color="#eab308", width=2),
+                                 marker=dict(size=8)))
     fig_roi.update_layout(
-        title="ROI mensual estimado por Stage (5,000 solicitudes/mes)",
+        title=f"ROI vs Costo — {req_mes:,} solicitudes/mes · ${costo_fallo}/fallo",
+        barmode="group",
         paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
-        font=dict(color="#e2e8f0"), height=340,
-        yaxis=dict(color="#94a3b8"),
+        font=dict(color="#e2e8f0"), height=320,
+        yaxis=dict(color="#94a3b8", tickprefix="$"),
         xaxis=dict(color="#94a3b8", tickangle=-15),
-        margin=dict(l=20,r=20,t=60,b=80)
+        legend=dict(font=dict(color="#e2e8f0")),
+        margin=dict(l=20, r=20, t=60, b=80)
     )
     st.plotly_chart(fig_roi, use_container_width=True)
-
-    st.markdown("""
-| Tipo de evaluación | Costo por request | Latencia | Fallos detectados |
-|---|---|---|---|
-| Checks determinísticos | ~$0.0001 | 5 ms | 25% |
-| Grounded Judge (LLM) | ~$0.008 | 320 ms | 55% |
-| Behavioral Judge (LLM) | ~$0.003 | 80 ms | 70% |
-| Safety Judge (LLM) | ~$0.004 | 120 ms | 80% |
-| Debate Council (4×LLM) | ~$0.025 | 850 ms | 92% |
-""")
-    st.info("**Regla de oro:** Checks determinísticos siempre inline (5ms, gratis). Jueces LLM solo cuando agrega valor real. Stack completo para 5,000 req/mes: < $200/mes.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 5 — CHAOS ENGINEERING
 # ═════════════════════════════════════════════════════════════════════════════
 with tab5:
     st.subheader("🔥 Chaos Engineering: inyectar fallos para entender la robustez")
-    st.caption("Los mejores sistemas no son los que nunca fallan — son los que detectan y comunican el fallo. (doc.md sección 9.1)")
+    st.caption("Los mejores sistemas no son los que nunca fallan — son los que detectan y comunican el fallo claramente.")
 
+    # Cada fallo tiene deltas POR JUEZ (no uniforme) y un color propio
     CHAOS_TYPES = {
-        "📄 Documento obsoleto":    {"desc":"DOC con fecha vieja aparece primero en el contexto","impact":"Stale Document → Juez detecta CONTRADICTED","score_delta":-0.55},
-        "⚡ Fuentes conflictivas":  {"desc":"Dos docs con datos opuestos en la misma KB","impact":"Reasoning Drift → Debate Judge dice REVISE","score_delta":-0.45},
-        "🔧 Tool failure":          {"desc":"El agente retriever devuelve vacío por error","impact":"Delegation Gap → Behavioral dice INCOMPLETE","score_delta":-0.65},
-        "✂️ Contexto truncado":     {"desc":"El contexto se corta a la mitad por límite de tokens","impact":"Error Cascade → todos los scores caen","score_delta":-0.70},
+        "📄 Documento obsoleto": {
+            "desc": "El agente recibe primero el documento desactualizado y lo usa como referencia principal.",
+            "impact": "Stale Document — Grounded detecta CONTRADICTED, Safety dice BLOCK",
+            "deltas": {"grounded": -0.65, "behavioral": -0.55, "safety": -0.75, "debate": -0.60},
+            "color": "#f97316", "is_bias": False,
+        },
+        "⚡ Fuentes conflictivas": {
+            "desc": "Dos documentos en la KB tienen datos opuestos. El agente no puede reconciliarlos.",
+            "impact": "Reasoning Drift — Debate dice REVISE, incertidumbre distribuida en todos los jueces",
+            "deltas": {"grounded": -0.40, "behavioral": -0.30, "safety": -0.20, "debate": -0.70},
+            "color": "#a855f7", "is_bias": False,
+        },
+        "🔧 Tool failure": {
+            "desc": "El retriever devuelve vacío. El agente responde sin documentos de respaldo.",
+            "impact": "Delegation Gap — Behavioral detecta INCOMPLETE, Grounded sin evidencia",
+            "deltas": {"grounded": -0.55, "behavioral": -0.70, "safety": -0.15, "debate": -0.25},
+            "color": "#ef4444", "is_bias": False,
+        },
+        "✂️ Contexto truncado": {
+            "desc": "El contexto se corta a la mitad por límite de tokens. La política vigente queda fuera.",
+            "impact": "Error Cascade — todos los jueces caen, el agente trabaja con info incompleta",
+            "deltas": {"grounded": -0.50, "behavioral": -0.60, "safety": -0.45, "debate": -0.50},
+            "color": "#eab308", "is_bias": False,
+        },
+        "🧠 Sesgo del juez LLM": {
+            "desc": "El juez LLM evalúa respuestas bien formateadas y con tono confiado como 'correctas', aunque contengan errores factuales.",
+            "impact": "Style Bias — Safety y Grounded dan scores INFLADOS. El sistema cree que todo está bien cuando no lo está.",
+            "deltas": {"grounded": +0.12, "behavioral": +0.08, "safety": +0.18, "debate": -0.06},
+            "color": "#06b6d4", "is_bias": True,
+        },
     }
 
-    BASE_SCORES = {"grounded":0.90,"behavioral":0.90,"safety":0.95,"debate":0.90}
+    # ── Baseline: real si hay historial, hardcoded si no ─────────────────────
+    rh5 = st.session_state.get("run_history", [])
+    last_correct = next((r for r in reversed(rh5) if "Correcto" in r["run"]), None)
+
+    if last_correct:
+        BASE_SCORES = {
+            "grounded":  last_correct["grounded"],
+            "behavioral":last_correct["behavioral"],
+            "safety":    last_correct["safety"],
+            "debate":    last_correct["debate"],
+        }
+        baseline_label = f"📌 Baseline: scores reales de **{last_correct['run']}**"
+        baseline_color = "#22c55e"
+    else:
+        BASE_SCORES = {"grounded": 0.90, "behavioral": 0.90, "safety": 0.95, "debate": 0.90}
+        baseline_label = "📌 Baseline de referencia (ejecuta el pipeline para usar tus scores reales)"
+        baseline_color = "#64748b"
+
+    st.markdown(f'<div style="color:{baseline_color};font-size:.85rem;margin-bottom:8px">{baseline_label}</div>',
+                unsafe_allow_html=True)
 
     col_a, col_b = st.columns([1, 1])
+
     with col_a:
-        st.markdown("**Selecciona el tipo de fallo a inyectar:**")
+        st.markdown("**1. Selecciona el tipo de fallo:**")
         chaos_sel = st.radio("", list(CHAOS_TYPES.keys()), label_visibility="collapsed")
         info = CHAOS_TYPES[chaos_sel]
-        st.markdown(f"""<div class="card" style="border-color:#f97316">
-<b style="color:#f97316">{chaos_sel}</b><br>
-<b>Qué hace:</b> {info['desc']}<br>
-<b>Modo de fallo:</b> {info['impact']}
+
+        st.markdown(f"""<div class="card" style="border-color:{info['color']}">
+<b style="color:{info['color']}">{chaos_sel}</b><br>
+<span style="font-size:.85rem"><b>Qué hace:</b> {info['desc']}</span><br>
+<span style="font-size:.82rem;color:#94a3b8"><b>Modo de fallo:</b> {info['impact']}</span>
 </div>""", unsafe_allow_html=True)
+
+        st.markdown("**2. Severidad del fallo:**")
+        severidad = st.select_slider("", options=["Leve (×0.5)", "Moderado (×1.0)", "Severo (×1.5)"],
+                                      value="Moderado (×1.0)", label_visibility="collapsed")
+        sev_factor = {"Leve (×0.5)": 0.5, "Moderado (×1.0)": 1.0, "Severo (×1.5)": 1.5}[severidad]
+
+        # Mostrar impacto esperado por juez antes de inyectar
+        st.markdown("**Impacto esperado por juez:**")
+        jkeys = ["grounded","behavioral","safety","debate"]
+        jnames = ["Grounded","Behavioral","Safety","Debate"]
+        for jk, jn in zip(jkeys, jnames):
+            raw = info["deltas"][jk] * sev_factor
+            arrow = "↑" if raw > 0 else "↓"
+            clr = "#06b6d4" if raw > 0 and info["is_bias"] else ("#22c55e" if raw > 0 else "#ef4444")
+            st.markdown(f'<span style="color:{clr};font-size:.85rem">{arrow} {jn}: {raw:+.2f}</span>',
+                        unsafe_allow_html=True)
 
         inject_btn = st.button("💉 Inyectar fallo y evaluar", type="primary", use_container_width=True)
 
     with col_b:
         if inject_btn:
-            delta = info["score_delta"]
             import random; random.seed(42)
-            scores_after = {k: max(0, v + delta + random.uniform(-0.05,0.05))
-                            for k,v in BASE_SCORES.items()}
-            avg_before = sum(BASE_SCORES.values()) / 4
-            avg_after  = sum(scores_after.values()) / 4
+            scores_after = {
+                k: min(1.0, max(0.0, BASE_SCORES[k] + info["deltas"][k] * sev_factor
+                                + random.uniform(-0.03, 0.03)))
+                for k in ["grounded","behavioral","safety","debate"]
+            }
+            avg_before = sum(BASE_SCORES[k] for k in jkeys) / 4
+            avg_after  = sum(scores_after[k] for k in jkeys) / 4
+
+            # Advertencia especial para sesgo
+            if info["is_bias"]:
+                st.warning("⚠️ **Sesgo del juez**: los scores SUBIERON — el sistema da falsa sensación de seguridad. Este es el fallo más difícil de detectar porque todo parece correcto.")
 
             st.markdown("**Comparación: antes vs después del fallo**")
-            df_chaos = pd.DataFrame({
-                "Juez":    ["Grounded","Behavioral","Safety","Debate","PROMEDIO"],
-                "Sin fallo": [BASE_SCORES[k] for k in ["grounded","behavioral","safety","debate"]] + [avg_before],
-                "Con fallo": [scores_after[k] for k in ["grounded","behavioral","safety","debate"]] + [avg_after],
-            })
-            df_chaos["Δ"] = (df_chaos["Con fallo"] - df_chaos["Sin fallo"]).map(lambda x: f"{x:+.2f}")
-            df_chaos["Sin fallo"] = df_chaos["Sin fallo"].map(lambda x: f"{x:.0%}")
-            df_chaos["Con fallo"] = df_chaos["Con fallo"].map(lambda x: f"{x:.0%}")
+            rows = []
+            for jk, jn in zip(jkeys, jnames):
+                b = BASE_SCORES[jk]
+                a = scores_after[jk]
+                d = a - b
+                rows.append({"Juez": jn, "Sin fallo": f"{b:.0%}", "Con fallo": f"{a:.0%}",
+                              "Δ": f"{d:+.2f}", "_d": d})
+            rows.append({"Juez": "PROMEDIO", "Sin fallo": f"{avg_before:.0%}",
+                         "Con fallo": f"{avg_after:.0%}",
+                         "Δ": f"{avg_after - avg_before:+.2f}", "_d": avg_after - avg_before})
+            df_chaos = pd.DataFrame(rows).drop(columns=["_d"])
             st.dataframe(df_chaos, use_container_width=True, hide_index=True)
 
+            # Radar chart
+            before_vals = [BASE_SCORES[k] for k in jkeys]
+            after_vals  = [scores_after[k] for k in jkeys]
             fig_ch = go.Figure()
-            judges_labels = ["Grounded","Behavioral","Safety","Debate"]
-            before_vals = [BASE_SCORES[k] for k in ["grounded","behavioral","safety","debate"]]
-            after_vals  = [scores_after[k] for k in ["grounded","behavioral","safety","debate"]]
-            for vals, name, color in [(before_vals,"Sin fallo","#22c55e"),(after_vals,"Con fallo","#ef4444")]:
+            for vals, name, clr in [(before_vals, "Sin fallo", "#22c55e"),
+                                     (after_vals,  "Con fallo", info["color"])]:
                 v2 = vals + [vals[0]]
-                t2 = judges_labels + [judges_labels[0]]
+                t2 = jnames + [jnames[0]]
                 fig_ch.add_trace(go.Scatterpolar(r=v2, theta=t2, fill="toself",
-                    name=name, line=dict(color=color, width=2)))
+                    name=name, line=dict(color=clr, width=2), opacity=0.8))
             fig_ch.update_layout(
                 polar=dict(radialaxis=dict(range=[0,1], color="#94a3b8"), bgcolor="#1e293b",
                            angularaxis=dict(color="#94a3b8")),
                 paper_bgcolor="#0f172a", font=dict(color="#e2e8f0"),
                 legend=dict(font=dict(color="#e2e8f0")),
-                height=300, margin=dict(l=40,r=40,t=40,b=20)
+                height=280, margin=dict(l=40,r=40,t=30,b=10)
             )
             st.plotly_chart(fig_ch, use_container_width=True)
 
             drop = avg_before - avg_after
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Score sin fallo", f"{avg_before:.0%}")
-            c2.metric("Score con fallo", f"{avg_after:.0%}", delta=f"{-drop:.0%}", delta_color="inverse")
+            if info["is_bias"]:
+                c2.metric("Score con fallo (inflado)", f"{avg_after:.0%}",
+                          delta=f"+{-drop:.0%} FALSO", delta_color="inverse")
+                c3.metric("Peligrosidad", "Alta", delta="invisible al sistema", delta_color="off")
+            else:
+                c2.metric("Score con fallo", f"{avg_after:.0%}",
+                          delta=f"{-drop:.0%}", delta_color="inverse")
+                c3.metric("Detección", "✅ Visible" if abs(drop) > 0.2 else "⚠️ Débil",
+                          delta=f"caída de {drop:.0%}", delta_color="off")
         else:
-            st.markdown('<div class="card" style="border-color:#334155;color:#64748b">Selecciona un tipo de fallo y presiona el botón para ver cómo afecta los scores de los jueces.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="card" style="border-color:#334155;color:#64748b">Selecciona un tipo de fallo, ajusta la severidad y presiona el botón para ver cómo reacciona cada juez.</div>', unsafe_allow_html=True)
