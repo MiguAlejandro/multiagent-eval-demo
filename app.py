@@ -129,14 +129,21 @@ DOCUMENTOS:
 RESPUESTA A EVALUAR:
 {respuesta}
 
-Instrucciones:
-- Verifica: ¿citó documentos? ¿usó la versión vigente? ¿omitió información crítica presente en los docs?
-- Solo reporta flags si hay un problema REAL y verificable. Si el proceso es correcto, indica "OK".
-- score: 1.0 si todo está bien, baja por cada problema real encontrado.
+REGLA CRÍTICA — Lee la RESPUESTA con cuidado antes de evaluar:
+- Solo reporta un flag si el problema está EXPLÍCITAMENTE VISIBLE en el texto de la respuesta.
+- NO inventes flags. Si la respuesta cita [POL-B] (VIGENTE), eso es CORRECTO — no lo marques como error.
+- STALE_DOCUMENT: solo si la respuesta LITERALMENTE cita o menciona el documento desactualizado (ej: "[POL-A]" aparece en el texto).
+- INCOMPLETE: solo si omitió información que era DIRECTAMENTE necesaria para responder la pregunta del usuario, no todo lo que existe en los docs.
 
-Devuelve JSON (score = 1.0 si el proceso fue correcto, baja 0.2-0.3 por cada problema real):
-{{"score": 1.0, "flags": ["OK: proceso correcto"]}}
-Si hay problemas: {{"score": 0.4, "flags": ["STALE_DOCUMENT: describir el problema", "INCOMPLETE: qué faltó"]}}"""
+Instrucciones:
+1. Lee el texto de la RESPUESTA completo.
+2. ¿Qué documentos citó? ¿Están marcados como VIGENTE o DESACTUALIZADO?
+3. ¿Los datos que dio son los más recientes disponibles?
+4. score: 1.0 si el proceso fue correcto, baja 0.3 por cada problema real y verificable.
+
+Devuelve JSON (score = 1.0 si el proceso fue correcto, menor si hay problemas REALES):
+{{"score": 1.0, "flags": ["OK: citó documentos vigentes, proceso correcto"]}}
+Solo si hay problema real y verificable en el texto: {{"score": 0.4, "flags": ["STALE_DOCUMENT: la respuesta menciona explícitamente [POL-A] que está desactualizado"]}}"""
     try:
         return client and _llm(client, prompt, max_tokens=300)
     except:
