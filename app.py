@@ -54,7 +54,10 @@ PREGUNTA_DEMO = "¿Cada cuántos días debo cambiar mi contraseña?"
 # ── FUNCIONES DE AGENTES ─────────────────────────────────────────────────────
 def get_client(key):
     if OAI_OK and key:
-        return OpenAI(api_key=key)
+        # Strip whitespace + non-ASCII chars that break HTTP headers on copy-paste
+        clean = key.strip().encode("ascii", errors="ignore").decode("ascii")
+        if clean:
+            return OpenAI(api_key=clean)
     return None
 
 def agente_analista(client, kb_texto):
