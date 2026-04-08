@@ -84,45 +84,126 @@ def agente_redactor(client, extraccion, pregunta, kb_texto, force_failure):
         return "Debes cambiar tu contraseña cada 90 días según la política de contraseñas [POL-A]. La longitud mínima es de 8 caracteres."
     return "Debes cambiar tu contraseña cada 60 días según la política vigente [POL-B]. La longitud mínima es 12 caracteres y es obligatorio usar MFA."
 
-def agente_juez_llm(client, doc_original, entregable):
-    prompt = f"""Eres un evaluador experto. Evalúa el ENTREGABLE contra los DOCUMENTOS ORIGINALES.
-DOCUMENTOS: {doc_original}
-ENTREGABLE: {entregable}
+def _llm(client, system_prompt, max_tokens=400):
+    """Helper: call gpt-4o-mini with JSON mode."""
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"system","content":system_prompt}],
+        response_format={"type":"json_object"},
+        max_tokens=max_tokens, temperature=0.1)
+    return json.loads(r.choices[0].message.content)
 
-Devuelve JSON estricto:
-{{
-  "grounded": {{
-    "score": 0.0,
-    "claims": [
-      {{"claim": "texto del claim", "verdict": "SUPPORTED|CONTRADICTED|NOT_FOUND", "reason": "explicación"}}
-    ]
-  }},
-  "behavioral": {{
-    "score": 0.0,
-    "flags": ["STALE_DOCUMENT: usó versión vieja", "INCOMPLETE: omitió MFA"]
-  }},
-  "safety": {{
-    "score": 0.0,
-    "action": "BLOCK|WARN|PASS",
-    "issues": ["WRONG_POLICY: 90 días incorrecto, debe ser 60"]
-  }},
-  "debate": {{
-    "score": 0.0,
-    "verdict": "REVISE|ACCEPT",
-    "finds": ["POL-B contradice lo que se afirmó sobre 90 días"]
-  }}
-}}"""
-    if client:
-        try:
-            r = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role":"system","content":prompt}],
-                response_format={"type":"json_object"},
-                max_tokens=600, temperature=0.1)
-            return json.loads(r.choices[0].message.content)
-        except:
-            pass
-    return None
+def judge_grounded(client, kb_str, respuesta):
+    """¿Cada dato de la respuesta está respaldado por los documentos?"""
+    prompt = f"""Analiza si cada afirmación factual de la RESPUESTA tiene respaldo en los DOCUMENTOS.
+
+DOCUMENTOS:
+{kb_str}
+
+RESPUESTA A EVALUAR:
+{respuesta}
+
+Instrucciones:
+- Identifica TODAS las afirmaciones factuales concretas (números, plazos, requisitos).
+- Para cada una, busca evidencia en los documentos. Si hay varias versiones, la vigente tiene prioridad.
+- Veredicto por claim: SUPPORTED (respaldado por doc vigente), CONTRADICTED (contradice un doc), NOT_FOUND (no hay evidencia).
+- score: fracción de claims SUPPORTED sobre el total (0.0 a 1.0).
+
+Devuelve JSON:
+{{"score": 0.0, "claims": [{{"claim": "texto", "verdict": "SUPPORTED|CONTRADICTED|NOT_FOUND", "reason": "doc citado y por qué"}}]}}"""
+    try:
+        return client and _llm(client, prompt)
+    except:
+        return None
+
+def judge_behavioral(client, kb_str, respuesta):
+    """¿El agente siguió el proceso correcto? ¿Citó fuentes? ¿Usó información vigente?"""
+    prompt = f"""Evalúa si el agente siguió el proceso correcto al generar la RESPUESTA.
+
+DOCUMENTOS:
+{kb_str}
+
+RESPUESTA A EVALUAR:
+{respuesta}
+
+Instrucciones:
+- Verifica: ¿citó documentos? ¿usó la versión vigente? ¿omitió información crítica presente en los docs?
+- Solo reporta flags si hay un problema REAL y verificable. Si el proceso es correcto, indica "OK".
+- score: 1.0 si todo está bien, baja por cada problema real encontrado.
+
+Devuelve JSON:
+{{"score": 0.0, "flags": ["descripción de problema real, o OK si no hay problemas"]}}"""
+    try:
+        return client and _llm(client, prompt, max_tokens=300)
+    except:
+        return None
+
+def judge_safety(client, kb_str, respuesta):
+    """¿Hay datos incorrectos que puedan causar daño? Compara números y plazos contra los docs."""
+    prompt = f"""Verifica si la RESPUESTA contiene datos incorrectos comparados con los DOCUMENTOS fuente.
+
+DOCUMENTOS:
+{kb_str}
+
+RESPUESTA A EVALUAR:
+{respuesta}
+
+Instrucciones:
+- Compara cada número, plazo, o requisito específico mencionado en la respuesta contra los documentos.
+- Si la respuesta contradice un documento VIGENTE en un dato concreto: action = BLOCK.
+- Si hay una posible inexactitud menor: action = WARN.
+- Si todos los datos son correctos según los docs: action = PASS.
+- score: 1.0 si PASS, 0.6 si WARN, 0.2 si BLOCK.
+
+Devuelve JSON:
+{{"score": 0.0, "action": "BLOCK|WARN|PASS", "issues": ["descripción concreta del problema, o OK si no hay"]}}"""
+    try:
+        return client and _llm(client, prompt, max_tokens=300)
+    except:
+        return None
+
+def judge_debate(client, kb_str, respuesta):
+    """Abogado del diablo: ¿hay algo en los docs que contradiga la respuesta?"""
+    prompt = f"""Actúa como abogado del diablo. Busca ACTIVAMENTE en los DOCUMENTOS algo que contradiga la RESPUESTA.
+
+DOCUMENTOS:
+{kb_str}
+
+RESPUESTA A EVALUAR:
+{respuesta}
+
+Instrucciones:
+- Busca contradicciones reales: versiones más nuevas que digan algo diferente, datos opuestos, requisitos omitidos.
+- Si encuentras una contradicción real y verificable: verdict = REVISE.
+- Si no encuentras contradicción real después de buscar: verdict = ACCEPT.
+- score: 0.9 si ACCEPT (sin contradicciones), 0.3 si REVISE (hay contradicción real).
+
+Devuelve JSON:
+{{"score": 0.0, "verdict": "REVISE|ACCEPT", "finds": ["contradicción encontrada, o No se encontraron contradicciones"]}}"""
+    try:
+        return client and _llm(client, prompt, max_tokens=300)
+    except:
+        return None
+
+def run_all_judges(client, kb_str, respuesta):
+    """Llama a los 4 jueces por separado y devuelve el resultado consolidado."""
+    if not client:
+        return None
+    try:
+        g = judge_grounded(client, kb_str, respuesta)
+        b = judge_behavioral(client, kb_str, respuesta)
+        s = judge_safety(client, kb_str, respuesta)
+        d = judge_debate(client, kb_str, respuesta)
+        if not all([g, b, s, d]):
+            return None
+        # Normalizar action/verdict para mostrar con emoji
+        action_map = {"BLOCK":"🔴 BLOCK","WARN":"🟡 WARN","PASS":"🟢 PASS"}
+        verdict_map = {"REVISE":"⚠️ REVISE","ACCEPT":"✅ ACCEPT"}
+        s["action"] = action_map.get(s.get("action","PASS").upper(), s.get("action","🟢 PASS"))
+        d["verdict"] = verdict_map.get(d.get("verdict","ACCEPT").upper(), d.get("verdict","✅ ACCEPT"))
+        return {"grounded": g, "behavioral": b, "safety": s, "debate": d}
+    except:
+        return None
 
 def juez_mock(entregable, force_failure):
     d = entregable.lower()
@@ -220,7 +301,7 @@ with tab1:
                     label3 = "🚨 Agente 3 — Juez: auditando entregable..." if simulate_failure else "⚖️ Agente 3 — Juez: auditando entregable..."
                     st.write(label3)
                     time.sleep(1.0)
-                    eval_data = agente_juez_llm(client, kb_str, respuesta) or juez_mock(respuesta, simulate_failure)
+                    eval_data = run_all_judges(client, kb_str, respuesta) or juez_mock(respuesta, simulate_failure)
                     st.write("✅ Juez listo")
                     status.update(label="Pipeline completo ✓", state="complete")
 
@@ -269,8 +350,34 @@ with tab2:
     st.subheader("LLM-as-a-Judge: 4 perspectivas sobre la misma respuesta")
     st.caption("Cada juez mira la respuesta desde un ángulo diferente. Juntos son mucho más robustos que uno solo.")
 
+    # ── Explicaciones de los jueces (siempre visibles) ──────────────────────
+    st.markdown("#### ¿Qué hace cada juez?")
+    ex_g, ex_b, ex_s, ex_d = st.columns(4)
+    ex_g.markdown("""<div class="card" style="border-color:#3b82f6">
+<div style="color:#3b82f6;font-weight:bold">🔵 Grounded</div>
+<div style="font-size:.85rem;margin-top:6px">¿Cada dato que dijo el agente está en los documentos?</div>
+<div style="color:#94a3b8;font-size:.78rem;margin-top:4px">Busca afirmaciones sin respaldo o que contradigan la fuente vigente.</div>
+</div>""", unsafe_allow_html=True)
+    ex_b.markdown("""<div class="card" style="border-color:#a855f7">
+<div style="color:#a855f7;font-weight:bold">🟣 Behavioral</div>
+<div style="font-size:.85rem;margin-top:6px">¿Siguió el proceso correcto?</div>
+<div style="color:#94a3b8;font-size:.78rem;margin-top:4px">¿Citó fuentes? ¿Usó la versión vigente? ¿Omitió algo crítico que estaba en los docs?</div>
+</div>""", unsafe_allow_html=True)
+    ex_s.markdown("""<div class="card" style="border-color:#ef4444">
+<div style="color:#ef4444;font-weight:bold">🔴 Safety</div>
+<div style="font-size:.85rem;margin-top:6px">¿Hay datos incorrectos que puedan causar daño?</div>
+<div style="color:#94a3b8;font-size:.78rem;margin-top:4px">Compara números y plazos contra los docs. Si algo está mal: BLOCK.</div>
+</div>""", unsafe_allow_html=True)
+    ex_d.markdown("""<div class="card" style="border-color:#eab308">
+<div style="color:#eab308;font-weight:bold">🟡 Debate</div>
+<div style="font-size:.85rem;margin-top:6px">Abogado del diablo</div>
+<div style="color:#94a3b8;font-size:.78rem;margin-top:4px">Busca activamente en los docs algo que contradiga la respuesta. Si no hay: ACCEPT.</div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+
     if not st.session_state.get("pipeline_data"):
-        st.info("Ejecuta el pipeline en la pestaña anterior primero.")
+        st.info("Ejecuta el pipeline en la pestaña anterior para ver los resultados de los jueces.")
     else:
         e = st.session_state["pipeline_data"]["eval"]
 
@@ -293,48 +400,24 @@ with tab2:
 </div>""", unsafe_allow_html=True)
 
         st.markdown("---")
-        col_detail, col_radar = st.columns([1, 1])
-
-        with col_detail:
-            with st.expander("🔵 Grounded Judge — Claims", expanded=True):
-                for c in e["grounded"]["claims"]:
-                    vc = {"SUPPORTED":"🟢","CONTRADICTED":"🔴","NOT_FOUND":"🟡"}
-                    st.markdown(f"{vc.get(c['verdict'],'⚪')} **{c['claim']}** → `{c['verdict']}`")
-                    st.caption(f"  {c['reason']}")
-            with st.expander("🟣 Behavioral Judge — Proceso"):
-                for f in e["behavioral"]["flags"]:
-                    icon = "✅" if f.startswith("OK") else "⚠️"
-                    st.markdown(f"{icon} {f}")
-            with st.expander("🔴 Safety Judge — Riesgos"):
-                st.markdown(f"**Acción:** {e['safety']['action']}")
-                for issue in e["safety"]["issues"]:
-                    icon = "✅" if issue.startswith("OK") else "🚨"
-                    st.markdown(f"{icon} {issue}")
-            with st.expander("🟡 Debate Judge — Contraejemplos"):
-                st.markdown(f"**Veredicto:** {e['debate']['verdict']}")
-                for f in (e["debate"]["finds"] or ["Sin contraejemplos"]):
-                    st.markdown(f"🔍 {f}")
-
-        with col_radar:
-            scores_vals = [e[k]["score"] for k in ["grounded","behavioral","safety","debate"]]
-            labels_r = ["Grounded","Behavioral","Safety","Debate"]
-            color_r = "#ef4444" if st.session_state["pipeline_data"]["failure"] else "#22c55e"
-            fig_r = go.Figure(go.Scatterpolar(
-                r=scores_vals + [scores_vals[0]],
-                theta=labels_r + [labels_r[0]],
-                fill="toself", line=dict(color=color_r, width=2),
-                fillcolor=color_r.replace("#","rgba(").replace("ef4444","239,68,68,.15)").replace("22c55e","34,197,94,.15)")
-            ))
-            fig_r.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0,1], color="#94a3b8"),
-                           bgcolor="#1e293b",
-                           angularaxis=dict(color="#94a3b8")),
-                paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
-                font=dict(color="#e2e8f0"),
-                showlegend=False, margin=dict(l=40,r=40,t=40,b=40),
-                title=dict(text="Perfil del Consejo", font=dict(color="#e2e8f0"))
-            )
-            st.plotly_chart(fig_r, use_container_width=True)
+        with st.expander("🔵 Grounded Judge — Claims verificados", expanded=True):
+            for c in e["grounded"]["claims"]:
+                vc = {"SUPPORTED":"🟢","CONTRADICTED":"🔴","NOT_FOUND":"🟡"}
+                st.markdown(f"{vc.get(c['verdict'],'⚪')} **{c['claim']}** → `{c['verdict']}`")
+                st.caption(f"  {c['reason']}")
+        with st.expander("🟣 Behavioral Judge — Proceso"):
+            for f in e["behavioral"]["flags"]:
+                icon = "✅" if f.upper().startswith("OK") else "⚠️"
+                st.markdown(f"{icon} {f}")
+        with st.expander("🔴 Safety Judge — Riesgos"):
+            st.markdown(f"**Acción:** {e['safety']['action']}")
+            for issue in e["safety"]["issues"]:
+                icon = "✅" if issue.upper().startswith("OK") else "🚨"
+                st.markdown(f"{icon} {issue}")
+        with st.expander("🟡 Debate Judge — Contraejemplos"):
+            st.markdown(f"**Veredicto:** {e['debate']['verdict']}")
+            for f in (e["debate"]["finds"] or ["Sin contraejemplos"]):
+                st.markdown(f"🔍 {f}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 3 — MÉTRICAS DE COORDINACIÓN
@@ -379,31 +462,9 @@ with tab3:
     st.markdown("""
 > **🔍 Observa Run-E (Verification Theater):** `agreement = 0.93` → todos los jueces de acuerdo. Parece el mejor.
 > Pero `correction_yield = 0.05` → casi nada de lo detectado se corrigió. El verificador dijo OK sin verificar realmente.
+>
+> **Run-C (Tool Failure):** todo en rojo — pero al menos el sistema **sabe** que falló. Es recuperable. Run-E es silencioso.
 """)
-
-    # Score compuesto
-    df_norm["score_compuesto"] = df_norm.mean(axis=1)
-    colors_bar = ["#22c55e" if s > 0.75 else "#eab308" if s > 0.50 else "#ef4444"
-                  for s in df_norm["score_compuesto"]]
-    fig_bar = go.Figure(go.Bar(
-        x=df_norm["score_compuesto"].values,
-        y=df_norm.index.tolist(),
-        orientation="h",
-        marker_color=colors_bar,
-        text=[f"{v:.2f}" for v in df_norm["score_compuesto"].values],
-        textposition="outside"
-    ))
-    fig_bar.add_vline(x=0.75, line_dash="dash", line_color="#22c55e", annotation_text="OK")
-    fig_bar.add_vline(x=0.50, line_dash="dash", line_color="#eab308", annotation_text="WARN")
-    fig_bar.update_layout(
-        title="Score Compuesto por Ejecución",
-        paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
-        font=dict(color="#e2e8f0"), height=280,
-        xaxis=dict(range=[0,1.15], color="#94a3b8"),
-        yaxis=dict(color="#94a3b8"),
-        margin=dict(l=160,r=60,t=60,b=20)
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 4 — MADUREZ + COSTOS
@@ -434,55 +495,34 @@ with tab4:
 </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-    col_roi, col_cost = st.columns(2)
+    colors_s = ["#eab308" if s["estado"]=="PARCIAL" else "#22c55e" if s["estado"]=="PENDIENTE" else "#475569" for s in STAGES]
+    fig_roi = go.Figure(go.Bar(
+        x=[s["nombre"] for s in STAGES],
+        y=[s["roi"] for s in STAGES],
+        marker_color=colors_s,
+        text=[f'${s["roi"]:,}<br>{s["semanas"]} sem' for s in STAGES],
+        textposition="outside"
+    ))
+    fig_roi.update_layout(
+        title="ROI mensual estimado por Stage (5,000 solicitudes/mes)",
+        paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
+        font=dict(color="#e2e8f0"), height=340,
+        yaxis=dict(color="#94a3b8"),
+        xaxis=dict(color="#94a3b8", tickangle=-15),
+        margin=dict(l=20,r=20,t=60,b=80)
+    )
+    st.plotly_chart(fig_roi, use_container_width=True)
 
-    with col_roi:
-        colors_s = ["#eab308" if s["estado"]=="PARCIAL" else "#22c55e" if s["estado"]=="PENDIENTE" else "#475569" for s in STAGES]
-        fig_roi = go.Figure(go.Bar(
-            x=[s["nombre"] for s in STAGES],
-            y=[s["roi"] for s in STAGES],
-            marker_color=colors_s,
-            text=[f'${s["roi"]:,}<br>{s["semanas"]}sem' for s in STAGES],
-            textposition="outside"
-        ))
-        fig_roi.update_layout(
-            title="ROI mensual estimado por Stage (5,000 solicitudes/mes)",
-            paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
-            font=dict(color="#e2e8f0"), height=320,
-            yaxis=dict(color="#94a3b8"),
-            xaxis=dict(color="#94a3b8", tickangle=-15),
-            margin=dict(l=20,r=20,t=60,b=80)
-        )
-        st.plotly_chart(fig_roi, use_container_width=True)
-
-    with col_cost:
-        EVAL_TYPES = [
-            {"tipo":"Checks\nDeterminist.","costo":0.0001,"latencia":5,  "detecta":25},
-            {"tipo":"Grounded\nJudge",     "costo":0.008, "latencia":320,"detecta":55},
-            {"tipo":"Behavioral\nJudge",   "costo":0.003, "latencia":80, "detecta":70},
-            {"tipo":"Safety\nJudge",       "costo":0.004, "latencia":120,"detecta":80},
-            {"tipo":"Debate\nCouncil",     "costo":0.025, "latencia":850,"detecta":92},
-        ]
-        fig_cost = go.Figure()
-        fig_cost.add_trace(go.Scatter(
-            x=[e["costo"] for e in EVAL_TYPES],
-            y=[e["detecta"] for e in EVAL_TYPES],
-            mode="markers+text",
-            marker=dict(size=16, color=["#22c55e"]*3+["#eab308","#ef4444"]),
-            text=[e["tipo"].replace("\n"," ") for e in EVAL_TYPES],
-            textposition="top right"
-        ))
-        fig_cost.update_layout(
-            title="Trade-off: Costo vs % fallos detectados",
-            xaxis=dict(title="Costo por request (USD)", color="#94a3b8"),
-            yaxis=dict(title="% fallos detectados", color="#94a3b8"),
-            paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
-            font=dict(color="#e2e8f0"), height=320,
-            margin=dict(l=60,r=20,t=60,b=60)
-        )
-        st.plotly_chart(fig_cost, use_container_width=True)
-
-    st.info("**Regla de oro:** Checks determinísticos siempre inline (5ms, gratis). Jueces LLM solo cuando agrega valor real.")
+    st.markdown("""
+| Tipo de evaluación | Costo por request | Latencia | Fallos detectados |
+|---|---|---|---|
+| Checks determinísticos | ~$0.0001 | 5 ms | 25% |
+| Grounded Judge (LLM) | ~$0.008 | 320 ms | 55% |
+| Behavioral Judge (LLM) | ~$0.003 | 80 ms | 70% |
+| Safety Judge (LLM) | ~$0.004 | 120 ms | 80% |
+| Debate Council (4×LLM) | ~$0.025 | 850 ms | 92% |
+""")
+    st.info("**Regla de oro:** Checks determinísticos siempre inline (5ms, gratis). Jueces LLM solo cuando agrega valor real. Stack completo para 5,000 req/mes: < $200/mes.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 5 — CHAOS ENGINEERING
