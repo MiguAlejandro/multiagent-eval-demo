@@ -285,11 +285,10 @@ def verdict_label(avg, umbral):
         return "❌ FAIL", "#ef4444"
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "🤖 Pipeline Multi-Agente",
     "⚖️ Los 4 Jueces",
     "📊 Métricas de Coordinación",
-    "📈 Madurez + Costos",
     "🔥 Chaos Engineering",
 ])
 
@@ -560,130 +559,9 @@ with tab3:
             st.rerun()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 4 — MADUREZ + COSTOS
+# TAB 4 — CHAOS ENGINEERING
 # ═════════════════════════════════════════════════════════════════════════════
 with tab4:
-    st.subheader("Modelo de Madurez: ¿Qué construir primero?")
-
-    STAGES = [
-        {"stage":0,"nombre":"Logs Only",          "semanas":1,"roi_base":5000, "fallos":10,"costo_base":2},
-        {"stage":1,"nombre":"Deterministic Gates", "semanas":2,"roi_base":18000,"fallos":25,"costo_base":3},
-        {"stage":2,"nombre":"Grounded Judging",    "semanas":3,"roi_base":45000,"fallos":55,"costo_base":55},
-        {"stage":3,"nombre":"Behavioral Scoring",  "semanas":3,"roi_base":55000,"fallos":75,"costo_base":70},
-        {"stage":4,"nombre":"Council + Replay",    "semanas":6,"roi_base":70000,"fallos":92,"costo_base":200},
-    ]
-
-    # ── Controles interactivos ────────────────────────────────────────────────
-    col_ctrl1, col_ctrl2 = st.columns([2, 1])
-    with col_ctrl1:
-        req_mes = st.slider("📦 Solicitudes por mes", min_value=500, max_value=50000,
-                            value=5000, step=500,
-                            help="Ajusta según el volumen real de tu sistema")
-    with col_ctrl2:
-        costo_fallo = st.number_input("💸 Costo promedio por fallo ($)", min_value=10,
-                                       max_value=10000, value=100, step=10,
-                                       help="Multa, reembolso, hora de soporte, etc.")
-
-    # Calcular ROI escalado con los parámetros del usuario
-    tasa_fallo_base = 0.15  # asumimos 15% de requests son fallos sin evaluación
-    for s in STAGES:
-        fallos_evitados = req_mes * tasa_fallo_base * (s["fallos"] / 100)
-        s["roi_calc"] = fallos_evitados * costo_fallo
-        s["costo_calc"] = s["costo_base"] * (req_mes / 5000)
-
-    st.markdown("---")
-
-    # ── Panel: tu sistema actual vs stages ───────────────────────────────────
-    rh = st.session_state.get("run_history", [])
-    if rh:
-        avg_global = sum(r["global"] for r in rh) / len(rh)
-        avg_safety = sum(r["safety"] for r in rh) / len(rh)
-        fallos_reales = sum(1 for r in rh if r["global"] < umbral) / len(rh)
-
-        st.markdown("#### Tu pipeline en números reales")
-        pa, pb, pc, pd_ = st.columns(4)
-        pa.metric("Ejecuciones registradas", len(rh))
-        pb.metric("Score global promedio", f"{avg_global:.0%}",
-                  delta="↑ bueno" if avg_global >= umbral else "↓ bajo umbral",
-                  delta_color="normal" if avg_global >= umbral else "inverse")
-        pc.metric("Safety promedio", f"{avg_safety:.0%}",
-                  delta="PASS" if avg_safety >= 0.7 else "RIESGO",
-                  delta_color="normal" if avg_safety >= 0.7 else "inverse")
-        pd_.metric("Runs bajo umbral", f"{fallos_reales:.0%}",
-                   delta="de tus ejecuciones fallaron", delta_color="off")
-
-        # Recomendación basada en datos reales
-        if avg_global < 0.5:
-            rec_stage = 2
-            rec_msg = "Scores muy bajos — el Grounded Judge (Stage 2) es urgente."
-            rec_color = "#ef4444"
-        elif avg_global < umbral:
-            rec_stage = 3
-            rec_msg = "Scores por debajo del umbral — Stage 2+3 es el siguiente paso."
-            rec_color = "#eab308"
-        else:
-            rec_stage = 4
-            rec_msg = "Tu pipeline pasa el umbral. Stage 4 (Council + Replay) para alto riesgo."
-            rec_color = "#22c55e"
-        st.markdown(f"""<div class="card" style="border-color:{rec_color}">
-<b style="color:{rec_color}">Recomendación basada en tus {len(rh)} ejecución(es):</b>
-Implementar Stage {rec_stage} — {rec_msg}
-</div>""", unsafe_allow_html=True)
-        st.markdown("---")
-
-    # ── Cards de stages ───────────────────────────────────────────────────────
-    st.markdown("#### ROI por stage — ajustado a tu volumen")
-    stage_cols = st.columns(5)
-    for col, s in zip(stage_cols, STAGES):
-        roi_n = s["roi_calc"]
-        costo_n = s["costo_calc"]
-        net = roi_n - costo_n
-        color = "#22c55e" if net > 0 else "#ef4444"
-        rec_mark = " ⭐" if s["stage"] in [2, 3] else ""
-        col.markdown(f"""<div class="card" style="border-color:{color};text-align:center">
-<div style="color:{color};font-size:.72rem;font-weight:bold">Stage {s['stage']}{rec_mark}</div>
-<div style="color:#e2e8f0;font-size:.78rem;margin:3px 0">{s['nombre']}</div>
-<div style="color:#22c55e;font-size:1.1rem;font-weight:bold">${roi_n:,.0f}</div>
-<div style="color:#94a3b8;font-size:.68rem">ROI/mes</div>
-<div style="color:#ef4444;font-size:.8rem">−${costo_n:,.0f} costo</div>
-<div style="color:{color};font-size:.72rem;font-weight:bold;margin-top:4px">
-  NET: ${net:,.0f}</div>
-<div style="color:#94a3b8;font-size:.68rem">{s['semanas']} sem · {s['fallos']}% fallos</div>
-</div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # ── Gráfico ROI vs Costo ──────────────────────────────────────────────────
-    nombres = [s["nombre"] for s in STAGES]
-    rois = [s["roi_calc"] for s in STAGES]
-    costos = [s["costo_calc"] for s in STAGES]
-    nets = [r - c for r, c in zip(rois, costos)]
-
-    fig_roi = go.Figure()
-    fig_roi.add_trace(go.Bar(name="ROI evitado", x=nombres, y=rois,
-                             marker_color="#22c55e", opacity=0.8))
-    fig_roi.add_trace(go.Bar(name="Costo evaluación", x=nombres, y=costos,
-                             marker_color="#ef4444", opacity=0.8))
-    fig_roi.add_trace(go.Scatter(name="Beneficio neto", x=nombres, y=nets,
-                                 mode="lines+markers",
-                                 line=dict(color="#eab308", width=2),
-                                 marker=dict(size=8)))
-    fig_roi.update_layout(
-        title=f"ROI vs Costo — {req_mes:,} solicitudes/mes · ${costo_fallo}/fallo",
-        barmode="group",
-        paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
-        font=dict(color="#e2e8f0"), height=320,
-        yaxis=dict(color="#94a3b8", tickprefix="$"),
-        xaxis=dict(color="#94a3b8", tickangle=-15),
-        legend=dict(font=dict(color="#e2e8f0")),
-        margin=dict(l=20, r=20, t=60, b=80)
-    )
-    st.plotly_chart(fig_roi, use_container_width=True)
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 5 — CHAOS ENGINEERING
-# ═════════════════════════════════════════════════════════════════════════════
-with tab5:
     st.subheader("🔥 Chaos Engineering: inyectar fallos para entender la robustez")
     st.caption("Los mejores sistemas no son los que nunca fallan — son los que detectan y comunican el fallo claramente.")
 
